@@ -16,6 +16,8 @@ namespace fs = std::experimental::filesystem;
 #define ADD "add"
 #define COMMIT "commit"
 #define LOG "log"
+#define STATUS "status"
+#define CHECKOUT "checkout"
 
 // present working directory
 const char *root = getenv("dir");
@@ -424,6 +426,218 @@ void getCommitLog()
         cout << commitLine << endl;
 }
 
+int BUFFER_SIZE = 8192;
+
+int compareFiles(string path1, string path2)
+{
+    ifstream lFile(path1.c_str(), ifstream::in | ifstream::binary);
+    ifstream rFile(path2.c_str(), ifstream::in | ifstream::binary);
+
+    if (!lFile.is_open() || !rFile.is_open())
+        return 1;
+
+    char *lBuffer = new char[BUFFER_SIZE]();
+    char *rBuffer = new char[BUFFER_SIZE]();
+
+    do
+    {
+        lFile.read(lBuffer, BUFFER_SIZE);
+        rFile.read(rBuffer, BUFFER_SIZE);
+        int numberOfRead = lFile.gcount();
+        if (numberOfRead != rFile.gcount())
+            return 1;
+
+        if (memcmp(lBuffer, rBuffer, numberOfRead) != 0)
+            return 1;
+
+    } while (lFile.good() || rFile.good());
+
+    delete[] lBuffer;
+    delete[] rBuffer;
+    return 0;
+}
+
+// Status
+void status()
+{
+    struct stat buffer;
+    ifstream readAddLog;
+    string line, headHash;
+    vector<string> staged;
+    vector<string> type;
+    vector<string> notStaged;
+    ifstream readCommitLog;
+    string stagedPath;
+
+    readCommitLog.open(string(root) + "/.imperium/commit.log");
+    getline(readCommitLog, headHash);
+
+    headHash = headHash.substr(0, 40);
+    readCommitLog.close();
+
+    ignorePaths.clear();
+    ifstream imperiumIgnore;
+    imperiumIgnore.open(root + string("/.imperiumIgnore"));
+    while (imperiumIgnore)
+    {
+        string path;
+        getline(imperiumIgnore, path);
+        ignorePaths.push_back(root + string("/") + path);
+    }
+
+    imperiumIgnore.close();
+
+    if (stat((string(root) + "/.imperium/.add").c_str(), &buffer) == 0)
+    {
+        readAddLog.open(string(root) + "/.imperium/add.log");
+
+        while (getline(readAddLog, line))
+        {
+            stagedPath = line.substr(string(root).length() + 1, line.length() - string(root).length() - 3);
+            if (stagedPath.length() == 0)
+                continue;
+            if (stat((string(root) + "/.imperium/.add/" + stagedPath).c_str(), &buffer) == 0)
+            {
+                if ((stat((string(root) + "/.imperium/.commit/" + headHash + "/" + stagedPath).c_str(), &buffer) == 0) || (stat((string(root) + "/.imperium/.commit").c_str(), &buffer) == 0))
+                {
+                    type.push_back("created: ");
+                    staged.push_back(stagedPath);
+                }
+                if (find(staged.begin(), staged.end(), stagedPath) == staged.end())
+                {
+                    notStaged.push_back("deleted: " + stagedPath);
+                }
+                else
+                {
+                    if (compareFiles(string(root) + "/" + stagedPath, string(root) + "/.imperium/.add/" + stagedPath))
+                    {
+                        notStaged.push_back("modified: " + stagedPath);
+                    }
+                }
+            }
+        }
+        readAddLog.close();
+        struct stat s;
+        if (stat((string(root) + "/.imperium/.commit").c_str(), &s) == 0)
+        {
+            for (auto &p : fs::recursive_directory_iterator(string(root)))
+            {
+                if (stat(p.path().c_str(), &s) == 0)
+                {
+                    string rootPath = p.path();
+                    if (ignoreCheck(p.path().c_str(), ignorePaths))
+                        continue;
+
+                    string commitPath = string(root) + "/.imperium/.commit/" + headHash + rootPath.substr(string(root).length());
+                    if (stat(commitPath.c_str(), &s) != 0 && find(staged.begin(), staged.end(), rootPath.substr(string(root).length() + 1)) == staged.end())
+                    {
+                        notStaged.push_back("created: " + rootPath.substr(string(root).length() + 1));
+                    }
+                    else
+                    {
+                        if (compareFiles(rootPath, commitPath))
+                        {
+                            if (find(staged.begin(), staged.end(), rootPath.substr(string(root).length() + 1)) == staged.end() && find(notStaged.begin(), notStaged.end(), stagedPath) == notStaged.end())
+                            {
+                                notStaged.push_back("modified: " + rootPath.substr(string(root).length() + 1));
+                            }
+                        }
+                    }
+                }
+                else
+                    continue;
+            }
+        }
+    }
+
+    if (stat((string(root) + "/.imperium/.commit/").c_str(), &buffer) == 0)
+    {
+        for (auto &p : fs::recursive_directory_iterator(string(root) + "/.imperium/.commit/" + headHash))
+        {
+            struct stat s;
+            if (stat(p.path().c_str(), &s) == 0)
+            {
+                if (s.st_mode && S_IFREG)
+                {
+                    string commitPath = p.path();
+                    string rootPath = string(root) + commitPath.substr(string(root).length() + 59);
+                    if (ignoreCheck(rootPath.c_str(), ignorePaths))
+                        continue;
+                    if (stat(rootPath.c_str(), &s) != 0)
+                    {
+                        notStaged.push_back("deleted: " + rootPath.substr(string(root).length() + 1));
+                    }
+                    else if (compareFiles(rootPath, commitPath))
+                    {
+                        if (find(staged.begin(), staged.end(), rootPath.substr(string(root).length() + 1)) == staged.end() && find(notStaged.begin(), notStaged.end(), stagedPath) == notStaged.end())
+                        {
+                            notStaged.push_back("modified: " + rootPath.substr(string(root).length() + 1));
+                        }
+                    }
+                    else
+                        continue;
+                }
+            }
+        }
+    }
+
+    if (notStaged.size())
+    {
+        cout << "Changes not staged for commit: \n";
+        for (int i = 0; i < notStaged.size(); i++)
+            cout << notStaged[i] << "\n";
+    }
+    if (staged.size())
+    {
+        cout << "\nChanges staged for commit:\n";
+        for (int i = 0; i < staged.size(); i++)
+            cout << type[i] << staged[i] << "\n";
+    }
+
+    if (!notStaged.size() && !staged.size())
+    {
+        cout << "Up to date.\n";
+    }
+    staged.clear();
+    type.clear();
+    notStaged.clear();
+}
+
+// Checkout
+
+void checkout(string commitHash)
+{
+    if (commitHash == "")
+    {
+        cout << "please provide a hash\n";
+        return;
+    }
+
+    bool hashCheck = false;
+    ifstream commitLog;
+    string commitLine;
+
+    commitLog.open(string(root) + "/.imperium/commit.log");
+
+    while (getline(commitLog, commitLine))
+    {
+        if (commitHash == commitLine.substr(0, 40))
+        {
+            hashCheck = true;
+            break;
+        }
+    }
+    commitLog.close();
+    if (hashCheck == false)
+    {
+        cout << "Incorrect Hash provided\n";
+        return;
+    }
+
+    string commitFolderPath = string(root) + "/.imperium/.commit/" + commitHash;
+    fs::copy(commitFolderPath, string(root) + "/", fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+}
+
 int main(int argc, char const *argv[])
 {
     if (argc == 1)
@@ -443,7 +657,10 @@ int main(int argc, char const *argv[])
             commit(argv[2]);
         else if (!strcmp(argv[1], LOG))
             getCommitLog();
-
+        else if (!strcmp(argv[1], STATUS))
+            status();
+        else if (!strcmp(argv[1], CHECKOUT))
+            checkout(argv[2]);
         else if (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h") || !strcmp(argv[1], "-H"))
             help();
     }
